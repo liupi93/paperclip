@@ -22,7 +22,11 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   };
 });
 
-import { prepareClaudeConfigSeed, prepareSandboxClaudeProbeRuntime } from "./claude-config.js";
+import {
+  hasConfiguredClaudeProviderCredential,
+  prepareClaudeConfigSeed,
+  prepareSandboxClaudeProbeRuntime,
+} from "./claude-config.js";
 
 describe("prepareClaudeConfigSeed", () => {
   const cleanupDirs: string[] = [];
@@ -127,6 +131,73 @@ describe("prepareClaudeConfigSeed", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.readFile(path.join(seedDir, "CLAUDE.md"), "utf8"))
       .resolves.toBe("local instructions");
+  });
+});
+
+describe("hasConfiguredClaudeProviderCredential", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  async function writeSettings(settings: unknown): Promise<NodeJS.ProcessEnv> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-provider-settings-"));
+    cleanupDirs.push(root);
+    const configDir = path.join(root, "claude-config");
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(configDir, "settings.json"), JSON.stringify(settings), "utf8");
+    return { CLAUDE_CONFIG_DIR: configDir };
+  }
+
+  it.each(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])(
+    "detects %s in the Claude settings env without returning its value",
+    async (key) => {
+      const env = await writeSettings({
+        env: {
+          ANTHROPIC_BASE_URL: "https://provider.example",
+          [key]: "provider-secret",
+        },
+      });
+
+      await expect(hasConfiguredClaudeProviderCredential(env)).resolves.toBe(true);
+    },
+  );
+
+  it("detects an apiKeyHelper configured for a Claude gateway", async () => {
+    const env = await writeSettings({
+      apiKeyHelper: "/opt/provider/read-token",
+      env: { ANTHROPIC_BASE_URL: "https://provider.example" },
+    });
+
+    await expect(hasConfiguredClaudeProviderCredential(env)).resolves.toBe(true);
+  });
+
+  it("does not treat a base URL without a credential source as ready", async () => {
+    const env = await writeSettings({
+      env: { ANTHROPIC_BASE_URL: "https://provider.example" },
+    });
+
+    await expect(hasConfiguredClaudeProviderCredential(env)).resolves.toBe(false);
+  });
+
+  it("fails closed for a missing or malformed settings file", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-provider-settings-"));
+    cleanupDirs.push(root);
+    await expect(
+      hasConfiguredClaudeProviderCredential({ CLAUDE_CONFIG_DIR: path.join(root, "missing") }),
+    ).resolves.toBe(false);
+
+    const configDir = path.join(root, "invalid");
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(configDir, "settings.json"), "{not-json", "utf8");
+    await expect(
+      hasConfiguredClaudeProviderCredential({ CLAUDE_CONFIG_DIR: configDir }),
+    ).resolves.toBe(false);
   });
 });
 

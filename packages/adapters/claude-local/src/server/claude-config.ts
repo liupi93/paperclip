@@ -20,6 +20,11 @@ import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { classifyThrownErrorClass, logSandboxProbeDiagnostic } from "./probe-diagnostics.js";
 
 const SEEDED_SHARED_FILES = ["settings.json", "CLAUDE.md"] as const;
+const CLAUDE_PROVIDER_CREDENTIAL_ENV_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+] as const;
 
 interface SeedFile {
   name: string;
@@ -125,6 +130,45 @@ export function resolveSharedClaudeConfigDir(
 ): string {
   const fromEnv = nonEmpty(env.CLAUDE_CONFIG_DIR);
   return fromEnv ? path.resolve(fromEnv) : path.join(os.homedir(), ".claude");
+}
+
+/**
+ * Return whether the host Claude settings already describe a usable provider
+ * credential without exposing or returning the credential itself. Claude Code
+ * supports putting provider environment variables in `settings.json`, and an
+ * `apiKeyHelper` can supply the credential dynamically. Both are sufficient to
+ * skip Paperclip's subscription-login prompt; the normal adapter Test still
+ * verifies that the configured provider actually responds.
+ */
+export async function hasConfiguredClaudeProviderCredential(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(resolveSharedClaudeConfigDir(env), "settings.json"), "utf8");
+  } catch {
+    return false;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+
+  const settings = parsed as Record<string, unknown>;
+  if (nonEmpty(typeof settings.apiKeyHelper === "string" ? settings.apiKeyHelper : undefined)) {
+    return true;
+  }
+  if (!settings.env || typeof settings.env !== "object" || Array.isArray(settings.env)) {
+    return false;
+  }
+  const settingsEnv = settings.env as Record<string, unknown>;
+  return CLAUDE_PROVIDER_CREDENTIAL_ENV_KEYS.some((key) =>
+    nonEmpty(typeof settingsEnv[key] === "string" ? settingsEnv[key] : undefined),
+  );
 }
 
 export function resolveManagedClaudeConfigSeedDir(

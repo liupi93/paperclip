@@ -154,7 +154,10 @@ import {
   isTruthyRuntimeEnvValue,
   resolveWorktreeRunExecutionActivationState,
 } from "../services/instance-settings.js";
-import { runClaudeLogin } from "@paperclipai/adapter-claude-local/server";
+import {
+  hasConfiguredClaudeProviderCredential,
+  runClaudeLogin,
+} from "@paperclipai/adapter-claude-local/server";
 import { createInviteRateLimiter } from "../services/invite-rate-limit.js";
 import {
   SetupTokenSessionService,
@@ -3583,34 +3586,56 @@ export function agentRoutes(
     },
   );
 
-  // The claude_local branch of the auth-signal read. It checks two host-local
-  // sources for a usable Claude Code OAuth token: the resolved envVars of the
-  // caller's selected environment, and the caller's own stored Claude login. It
-  // returns "present" the moment either source holds a non-empty token, so it
-  // never resolves more than the one env key it needs.
+  const CLAUDE_AUTH_ENV_KEYS = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ] as const;
+
+  // The claude_local branch of the auth-signal read. Claude Code can
+  // authenticate with Anthropic, a compatible third-party endpoint, or a
+  // subscription. Treat every supported credential env key as ready so the
+  // setup wizard does not force an official Claude login over an existing
+  // provider configuration. Host env only applies to host/local execution;
+  // remote environments must carry their own credential.
   async function evaluateClaudeAuthSignal(
     req: Request,
     companyId: string,
     environmentId: string | null,
   ): Promise<AdapterAuthSignal> {
+    let environmentIsLocal = environmentId === null;
     if (environmentId) {
       const environment = await environmentsSvc.getById(environmentId);
+      environmentIsLocal = environment?.driver === "local";
       const environmentEnv = Object.fromEntries(
         Object.entries(parseObject(environment?.envVars)).filter(
           ([key]) => !isForbiddenConfigEnvKey(key),
         ),
       );
-      const tokenBinding = environmentEnv.CLAUDE_CODE_OAUTH_TOKEN;
-      if (tokenBinding !== undefined) {
+      const authBindings = Object.fromEntries(
+        CLAUDE_AUTH_ENV_KEYS.flatMap((key) =>
+          environmentEnv[key] === undefined ? [] : [[key, environmentEnv[key]]],
+        ),
+      );
+      if (Object.keys(authBindings).length > 0) {
         const resolution = await secretsSvc.resolveEnvBindings(
           companyId,
-          { CLAUDE_CODE_OAUTH_TOKEN: tokenBinding },
+          authBindings,
           buildActorSecretContext(req, { consumerType: "environment", consumerId: environmentId }),
         );
-        if (asNonEmptyString(resolution.env.CLAUDE_CODE_OAUTH_TOKEN)) {
+        if (CLAUDE_AUTH_ENV_KEYS.some((key) => asNonEmptyString(resolution.env[key]))) {
           return "present";
         }
       }
+    }
+    if (
+      environmentIsLocal &&
+      CLAUDE_AUTH_ENV_KEYS.some((key) => asNonEmptyString(process.env[key]))
+    ) {
+      return "present";
+    }
+    if (environmentIsLocal && (await hasConfiguredClaudeProviderCredential())) {
+      return "present";
     }
     const ownerUserId = req.actor.userId;
     if (ownerUserId) {
@@ -3665,13 +3690,13 @@ export function agentRoutes(
     return readiness.ready ? "present" : "absent";
   }
 
-  // The cheap host-local authentication signal for one adapter type. The route
-  // reads host-local state only: a stored Claude login, a resolved environment
-  // env var, or the local Codex credential readiness check. It leases no
-  // sandbox, starts no shell command, and starts no model request. The two
-  // access gates below run before any read, so a caller who cannot create
-  // agents for the company and a foreign environment both fail closed before
-  // the route touches a credential source.
+  // The cheap authentication signal for one adapter type. The route reads only
+  // credential metadata available without starting the adapter: resolved env
+  // bindings on the selected environment, host credentials for a local target,
+  // or the caller's stored Claude login. It leases no sandbox, starts no shell
+  // command, and starts no model request. The two access gates below run before
+  // any read, so a caller who cannot create agents for the company and a foreign
+  // environment both fail closed before the route touches a credential source.
   router.get(
     "/companies/:companyId/adapters/:type/auth-signal",
     async (req, res) => {

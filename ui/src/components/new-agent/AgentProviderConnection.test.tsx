@@ -268,10 +268,52 @@ describe("AgentProviderConnection reuse", () => {
 
   it("defaults to subscription when no saved credentials exist", async () => {
     await mount("claude_local", false, true, false, false);
-    expect(host.textContent).toContain("Use API key instead");
-    click("Use API key instead");
+    expect(host.textContent).toContain("API / compatible provider");
+    click("API / compatible provider");
     openProvider();
     expect(host.querySelector('input[type="password"]')).not.toBeNull();
+  });
+
+  it("tests an Anthropic-compatible Claude provider with its base URL and auth token", async () => {
+    const { test, connected } = await mount(
+      "claude_local",
+      false,
+      true,
+      false,
+      false,
+    );
+    click("API / compatible provider");
+    openProvider();
+    const baseUrl = host.querySelector(
+      'input[aria-label="Provider base URL"]',
+    ) as HTMLInputElement;
+    const credential = host.querySelector(
+      'input[aria-label="API key"]',
+    ) as HTMLInputElement;
+    flushSync(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        baseUrl,
+        "https://provider.example/v1",
+      );
+      baseUrl.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        credential,
+        "third-party-token",
+      );
+      credential.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    click("Connect");
+    await vi.waitFor(() => expect(connected).toHaveBeenCalled());
+    expect(managedApi.create).not.toHaveBeenCalled();
+    expect(test).toHaveBeenCalledWith({
+      env: {
+        ANTHROPIC_BASE_URL: {
+          type: "plain",
+          value: "https://provider.example/v1",
+        },
+      },
+      credentials: { ANTHROPIC_AUTH_TOKEN: "third-party-token" },
+    });
   });
 
   it("does not use a cached Claude login for Codex", async () => {
@@ -373,7 +415,7 @@ describe("AgentProviderConnection reuse", () => {
   });
   it("does not treat an environment credential as a stored Claude login", async () => {
     const { test } = await mount();
-    click("Use subscription instead");
+    click("Claude account");
     openProvider();
     click("Connect");
     await vi.waitFor(() => expect(test).toHaveBeenCalledWith({ env: {} }));
@@ -404,7 +446,7 @@ describe("AgentProviderConnection reuse", () => {
   });
   it("never offers a saved Codex home in Claude's subscription chooser", async () => {
     await mount("claude_local", false, true, true);
-    click("Use subscription instead");
+    click("Claude account");
     openProvider();
     expect(host.querySelector('select[aria-label="Saved subscription"]')).toBeNull();
     expect(host.textContent).not.toContain("ChatGPT account");

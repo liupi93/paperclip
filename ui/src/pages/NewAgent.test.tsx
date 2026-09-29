@@ -263,7 +263,7 @@ describe("New agent setup", () => {
       await click("GrokSubscription");
       await click("Complete subscription login");
     } else {
-      await click("Use API key insteadUse subscription insteadUse API key instead");
+      await click("API keyUse a Grok API key");
       await click("GrokAPI");
       await fill("API key", "example-test-secret");
       await click("Connect");
@@ -461,7 +461,11 @@ describe("New agent setup", () => {
     ["paperclip_runner", "codex", "OpenAI", "OPENAI_API_KEY"],
   ])("stores %s %s as a reusable connection before hiring", async (adapter, runner, provider, key) => {
     await render(adapter, runner);
-    await click("Use API key insteadUse subscription insteadUse API key instead");
+    await click(
+      provider === "Claude"
+        ? "API / compatible providerAnthropic or a third-party endpoint"
+        : "API keyUse a OpenAI API key",
+    );
     await click(provider + "API");
     await fill("API key", "connection-key");
     await click("Connect");
@@ -474,6 +478,42 @@ describe("New agent setup", () => {
     expect(api.hire.mock.calls[0][1].runtimeConfig.aiConnection).toEqual(binding);
     expect(managedApi.create).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(api.hire.mock.calls)).not.toContain("connection-key");
+  });
+  it("configures Claude Code for an Anthropic-compatible provider from the UI", async () => {
+    await render("claude_local", "claude");
+    await click("API / compatible providerAnthropic or a third-party endpoint");
+    await click("ClaudeAPI");
+    await fill("Provider base URL", "https://provider.example/v1");
+    await fill("API key or auth token", "third-party-token");
+    await click("Connect");
+    expect(managedApi.create).not.toHaveBeenCalled();
+    expect(api.testEnvironment.mock.calls[0][2]).toMatchObject({
+      adapterConfig: {
+        env: {
+          ANTHROPIC_BASE_URL: {
+            type: "plain",
+            value: "https://provider.example/v1",
+          },
+        },
+      },
+      testCredentials: { ANTHROPIC_AUTH_TOKEN: "third-party-token" },
+    });
+    await click("Finish setup");
+    expect(secrets.createUserSecretDefinition).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ key: expect.stringMatching(/^ANTHROPIC_AUTH_TOKEN\.setup\./) }),
+    );
+    const hiredEnv = api.hire.mock.calls[0][1].adapterConfig.env;
+    expect(hiredEnv.ANTHROPIC_BASE_URL).toEqual({
+      type: "plain",
+      value: "https://provider.example/v1",
+    });
+    expect(hiredEnv.ANTHROPIC_AUTH_TOKEN).toEqual({
+      type: "user_secret_ref",
+      key: expect.stringMatching(/^ANTHROPIC_AUTH_TOKEN\.setup\./),
+      version: "latest",
+    });
+    expect(JSON.stringify(api.hire.mock.calls)).not.toContain("third-party-token");
   });
   it.each([
     ["claude_local", "claude", "Claude", "ANTHROPIC_API_KEY"],

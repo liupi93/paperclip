@@ -2,10 +2,11 @@ import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The cheap host-local authentication-signal route. It reads no sandbox and
-// runs no shell command or model process, so every test drives it through a
-// plain in-process Express app with fake services -- no database, no
-// sandbox provider, and no adapter execution.
+// The cheap authentication-signal route reads host-local metadata or the
+// selected environment's stored bindings. It reads no sandbox and runs no
+// shell command or model process, so every test drives it through a plain
+// in-process Express app with fake services -- no database, no sandbox
+// provider, and no adapter execution.
 
 const COMPANY_1 = "company-1";
 const OTHER_COMPANY = "company-2";
@@ -59,6 +60,7 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
 // controls its resolved value and its failure, so it stays independent of a
 // real Codex home on disk.
 const mockEvaluateCodexCredentialReadiness = vi.hoisted(() => vi.fn());
+const mockHasConfiguredClaudeProviderCredential = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
@@ -112,6 +114,14 @@ vi.mock("@paperclipai/adapter-codex-local/server", async (importOriginal) => {
   };
 });
 
+vi.mock("@paperclipai/adapter-claude-local/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/adapter-claude-local/server")>();
+  return {
+    ...actual,
+    hasConfiguredClaudeProviderCredential: mockHasConfiguredClaudeProviderCredential,
+  };
+});
+
 let currentActor: Record<string, unknown>;
 
 function boardActor(userId: string, companyIds: string[] = [COMPANY_1, OTHER_COMPANY]): Record<string, unknown> {
@@ -147,6 +157,9 @@ describe("adapter auth-signal route", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
     currentActor = boardActor(OWNER_A);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
@@ -169,6 +182,7 @@ describe("adapter auth-signal route", () => {
       manifest: [],
     });
     mockSecretService.readClaudeOAuthUserSecretStatus.mockResolvedValue(null);
+    mockHasConfiguredClaudeProviderCredential.mockResolvedValue(false);
     mockEvaluateCodexCredentialReadiness.mockResolvedValue({
       managed: true,
       authMode: "subscription",
@@ -179,6 +193,7 @@ describe("adapter auth-signal route", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
   });
 
@@ -325,6 +340,97 @@ describe("adapter auth-signal route", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body).toEqual({ status: "present" });
     expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+  });
+
+  it.each(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])(
+    "returns present for claude_local when the environment holds %s",
+    async (envKey) => {
+      mockEnvironmentService.getById.mockResolvedValue({
+        id: ENVIRONMENT_1,
+        companyId: COMPANY_1,
+        name: "Compatible Claude provider",
+        driver: "sandbox",
+        status: "active",
+        config: { provider: "fake-plugin" },
+        envVars: {
+          ANTHROPIC_BASE_URL: { type: "plain", value: "https://provider.example" },
+          [envKey]: { type: "secret_ref", secretId: "secret-1" },
+        },
+      });
+      mockSecretService.resolveEnvBindings.mockResolvedValueOnce({
+        env: { [envKey]: "resolved-credential" },
+        secretKeys: new Set([envKey]),
+        manifest: [],
+      });
+      const app = await createApp();
+
+      const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local", ENVIRONMENT_1));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toEqual({ status: "present" });
+      expect(mockSecretService.resolveEnvBindings).toHaveBeenCalledWith(
+        COMPANY_1,
+        { [envKey]: { type: "secret_ref", secretId: "secret-1" } },
+        expect.anything(),
+      );
+      expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])(
+    "returns present for claude_local on the host when %s is inherited",
+    async (envKey) => {
+      vi.stubEnv(envKey, "host-credential");
+      const app = await createApp();
+
+      const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toEqual({ status: "present" });
+      expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+    },
+  );
+
+  it("uses a host Claude credential for a local-driver environment", async () => {
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "host-credential");
+    mockEnvironmentService.getById.mockResolvedValue({
+      id: ENVIRONMENT_1,
+      companyId: COMPANY_1,
+      name: "Local host",
+      driver: "local",
+      status: "active",
+      config: {},
+      envVars: {},
+    });
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local", ENVIRONMENT_1));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "present" });
+    expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+  });
+
+  it("uses a Claude provider credential from local settings", async () => {
+    mockHasConfiguredClaudeProviderCredential.mockResolvedValueOnce(true);
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local"));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "present" });
+    expect(mockSecretService.readClaudeOAuthUserSecretStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not use a host Claude credential for a remote environment", async () => {
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "host-only-token");
+    const app = await createApp();
+
+    const res = await request(app).get(authSignalPath(COMPANY_1, "claude_local", ENVIRONMENT_1));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ status: "absent" });
+    expect(mockHasConfiguredClaudeProviderCredential).not.toHaveBeenCalled();
   });
 
   it("returns present for claude_local when the owner holds a stored login and the environment holds no key", async () => {

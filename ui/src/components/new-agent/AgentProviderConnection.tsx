@@ -19,7 +19,6 @@ import {
   OnboardingLoginCard,
 } from "../AdapterLoginChrome";
 import { ModelSourceTiles } from "../onboarding/ModelSourceTiles";
-import { CredentialModeLink } from "../onboarding/CredentialModeLink";
 import { FooterNav } from "../onboarding/FooterNav";
 import { MAKE_ROOM, CARD_ENTER } from "../onboarding/onboarding-motion";
 import { buildFixedClaudeOAuthBinding } from "../environment-variables-editor/model";
@@ -85,6 +84,7 @@ export function AgentProviderConnection({
   const [loginPhase, setLoginPhase] = useState<"preparing" | "ready" | "waiting" | "connecting">("preparing");
   const phaseBeforeSubmit = useRef<"ready" | "waiting">("ready");
   const [apiKey, setApiKey] = useState("");
+  const [anthropicBaseUrl, setAnthropicBaseUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [storedConnection, setStoredConnection] =
@@ -155,13 +155,30 @@ export function AgentProviderConnection({
         if (run === epoch.current) managedAccount.onComplete({ ...result, method: method === "api" ? "api_key" : "subscription" });
         return;
       }
+      const customClaudeProvider =
+        adapterType === "claude_local" && Boolean(anthropicBaseUrl.trim());
+      if (customClaudeProvider) {
+        const url = new URL(anthropicBaseUrl.trim());
+        if (url.protocol !== "https:" && url.protocol !== "http:")
+          throw new Error("Enter an HTTP or HTTPS provider base URL.");
+      }
       let connection: ProviderConnection =
         method === "api"
           ? selectedKey
             ? selectedKey.aiConnection ? { env: {}, aiConnection: selectedKey.aiConnection } : { env: { [envKey]: selectedKey.binding } }
             : (storedConnection ?? {
-                env: {},
-                credentials: { [envKey]: apiKey.trim() },
+                env: customClaudeProvider
+                  ? {
+                      ANTHROPIC_BASE_URL: {
+                        type: "plain",
+                        value: anthropicBaseUrl.trim(),
+                      },
+                    }
+                  : {},
+                credentials: {
+                  [customClaudeProvider ? "ANTHROPIC_AUTH_TOKEN" : envKey]:
+                    apiKey.trim(),
+                },
               })
           : {
               ...(savedSubscription?.aiConnection ? { aiConnection: savedSubscription.aiConnection } : {}),
@@ -179,7 +196,7 @@ export function AgentProviderConnection({
         savedManagedAccount.current ??= await localLogin.connect();
         connection = { env: {}, aiConnection: { provider: aiProvider, method: "subscription", mode: "responsible_user" } };
       }
-      if (connection.credentials) {
+      if (connection.credentials && !customClaudeProvider) {
         await aiConnectionsApi.create(companyId, { provider: aiProvider, method: "api_key", name: `My ${provider} API`, ownership: "personal", apiKey: connection.credentials[envKey], agentIds: [], allAgents: true });
         connection = { env: {}, aiConnection: { provider: aiProvider, method: "api_key", mode: "responsible_user" } };
       }
@@ -217,6 +234,58 @@ export function AgentProviderConnection({
     (Boolean(managedAccount) || auth.data?.status !== "present" || subscriptionId === "");
   return (
     <div className="min-w-0 max-w-full">
+      {!managedAccount?.fixedMethod && (
+        <div
+          role="group"
+          aria-label="Authentication method"
+          className="mb-4 grid gap-3 sm:grid-cols-2"
+        >
+          {([
+            {
+              id: "subscription" as const,
+              title: `${provider} account`,
+              detail: "Official account sign-in",
+            },
+            {
+              id: "api" as const,
+              title:
+                adapterType === "claude_local"
+                  ? "API / compatible provider"
+                  : "API key",
+              detail:
+                adapterType === "claude_local"
+                  ? "Anthropic or a third-party endpoint"
+                  : `Use a ${provider} API key`,
+            },
+          ]).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              aria-pressed={method === option.id}
+              disabled={busy || managedAccount?.disabled}
+              onClick={() => {
+                savedManagedAccount.current = null;
+                setMethod(option.id);
+                setOpened(false);
+                setStoredConnection(null);
+                setError(null);
+              }}
+              className={
+                method === option.id
+                  ? "rounded-md border border-foreground/40 bg-accent p-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  : "rounded-md border border-border bg-card p-3 text-left outline-none transition-colors hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring"
+              }
+            >
+              <span className="block text-sm font-medium text-foreground">
+                {option.title}
+              </span>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                {option.detail}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
       <ModelSourceTiles
         label="Connect your model provider"
         sources={[
@@ -231,18 +300,6 @@ export function AgentProviderConnection({
         collapsed={opened}
         onSelect={() => { if (!managedAccount?.disabled) setOpened(true); }}
       />
-      {!opened && !managedAccount?.fixedMethod && (
-        <div className="-ml-3 mt-1">
-          <CredentialModeLink
-            mode={method}
-            onChange={(next) => {
-              savedManagedAccount.current = null;
-              setMethod(next);
-              setError(null);
-            }}
-          />
-        </div>
-      )}
       {!opened && savedKeys.options.length > 0 && (
         <p className="mt-2 text-sm text-muted-foreground">
           {savedKeys.options.length} saved API{" "}
@@ -289,24 +346,49 @@ export function AgentProviderConnection({
                   }}
                 />
                 {!selectedKey && (
-                  <OnboardingCardField
-                    label="API key"
-                    masked
-                    autoFocus
-                    value={apiKey}
-                    placeholder={
-                      storedConnection
-                        ? "Key entered. Retry the connection."
-                        : "Enter API key here"
-                    }
-                    onChange={(value) => {
-                      setSelectedKeyId("");
-                      setApiKey(value);
-                      setStoredConnection(null);
-                    }}
-                    onSubmit={() => void connect()}
-                    disabled={busy}
-                  />
+                  <div className="space-y-3">
+                    {adapterType === "claude_local" && (
+                      <OnboardingCardField
+                        label="Provider base URL"
+                        value={anthropicBaseUrl}
+                        placeholder="Optional: https://provider.example/v1"
+                        onChange={(value) => {
+                          setAnthropicBaseUrl(value);
+                          setStoredConnection(null);
+                          setError(null);
+                        }}
+                        onSubmit={() => {}}
+                        disabled={busy}
+                      />
+                    )}
+                    <OnboardingCardField
+                      label={
+                        adapterType === "claude_local" && anthropicBaseUrl.trim()
+                          ? "API key or auth token"
+                          : "API key"
+                      }
+                      masked
+                      autoFocus
+                      value={apiKey}
+                      placeholder={
+                        storedConnection
+                          ? "Credential entered. Retry the connection."
+                          : "Enter credential here"
+                      }
+                      onChange={(value) => {
+                        setSelectedKeyId("");
+                        setApiKey(value);
+                        setStoredConnection(null);
+                      }}
+                      onSubmit={() => void connect()}
+                      disabled={busy}
+                    />
+                    {adapterType === "claude_local" && (
+                      <p className="text-xs text-muted-foreground">
+                        Add a base URL for an Anthropic-compatible provider. Paperclip stores the credential as a secret and passes it to Claude Code as ANTHROPIC_AUTH_TOKEN.
+                      </p>
+                    )}
+                  </div>
                 )}
               </OnboardingLoginCard>
             ) : needsLogin ? (

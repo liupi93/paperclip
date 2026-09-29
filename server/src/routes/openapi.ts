@@ -3721,7 +3721,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/adapters/{type}/auth-signal",
   tags: ["adapters"],
   summary:
-    "Read the cheap host-local authentication signal for an adapter type",
+    "Read the cheap authentication readiness signal for an adapter type and environment",
   request: {
     params: z.object({ companyId: z.string(), type: z.string() }),
     query: z.object({ environmentId: z.string().optional() }),

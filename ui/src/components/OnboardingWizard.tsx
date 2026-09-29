@@ -1044,11 +1044,11 @@ function OnboardingWizardInner({
   );
   // The cheap signal, re-read whenever the adapter type or the resolved login
   // environment changes (both are part of the query key). It reports whether
-  // the host already holds a usable credential, with no adapter environment
-  // test. The route reads only host-local state, so a login baked into a
-  // sandbox image rather than held on the host reads as `absent` even though
-  // the owner could already sign in — the panel then shows for one extra step
-  // it did not strictly need, never the reverse.
+  // the local host or the selected environment already holds a configured
+  // credential, with no adapter environment test. A login baked into a sandbox
+  // image but not represented by an environment binding remains invisible to
+  // this check, so the panel can show for one extra step it did not strictly
+  // need, never the reverse.
   const authSignalQuery = useQuery({
     queryKey: createdCompanyId
       ? queryKeys.agents.authSignal(createdCompanyId, adapterType, resolvedLoginEnvironmentId)
